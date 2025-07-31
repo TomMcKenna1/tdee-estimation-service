@@ -10,7 +10,7 @@ MOCK_DB = {
             "uid": "user_123",
             "name": "Jane Doe",
             "email": "jane@example.com",
-            "createdAt": datetime(2025, 7, 1),
+            "createdAt": datetime(2025, 7, 1, 0, 0),
             "onboardingComplete": True,
             "profile": {
                 "sex": "male",
@@ -25,34 +25,34 @@ MOCK_DB = {
     "meals": {
         "meal_1": {
             "uid": "user_123",
-            "createdAt": datetime(2025, 7, 28, 8),
+            "createdAt": datetime(2025, 7, 28, 8, 0),
             "status": "complete",
             "data": {"nutrientProfile": {"energy": 500}},
         },
         "meal_2": {
             "uid": "user_123",
-            "createdAt": datetime(2025, 7, 28, 13),
+            "createdAt": datetime(2025, 7, 28, 13, 0),
             "status": "complete",
             "data": {"nutrientProfile": {"energy": 800}},
         },
         "meal_3": {
             "uid": "user_123",
-            "createdAt": datetime(2025, 7, 28, 19),
+            "createdAt": datetime(2025, 7, 28, 19, 0),
             "status": "complete",
-            "data": {"nutrientProfile": {"energy": 650}},
+            "data": {"nutrientProfile": {"energy": 850}},
         },
         "meal_4": {
             "uid": "user_123",
-            "createdAt": datetime(2025, 7, 29, 9),
+            "createdAt": datetime(2025, 7, 29, 9, 0),
             "status": "pending",
             "data": {"nutrientProfile": {"energy": 400}},
-        },  # This one is pending, so it should be ignored
+        },
     },
     "weight_logs": {
         "log_1": {
             "uid": "user_123",
-            "createdAt": datetime(2025, 7, 29, 7),
-            "weight_kg": 76,
+            "createdAt": datetime(2025, 7, 26, 7, 0),
+            "weight_kg": 75.5,
         }
     },
     "tdeeHistory": {},

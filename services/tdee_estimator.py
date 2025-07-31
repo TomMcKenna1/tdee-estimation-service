@@ -62,7 +62,13 @@ class TDEEEstimator:
 
         # Predict next covariance
         # Process noise matrix Q
-        Q = np.array([[0, 0], [0, config.PROCESS_NOISE_VAR_TDEE]])
+        weight_variance_from_calories = config.CALORIE_INTAKE_UNCERTAINTY_VAR / (config.KCAL_PER_KG_BODY_WEIGHT ** 2)
+        Q = np.array(
+            [
+                [weight_variance_from_calories, 0],
+                [0, config.PROCESS_NOISE_VAR_TDEE],
+            ]
+        )
         self.covariance = self.F @ self.covariance @ self.F.T + Q
 
     def update(self, measured_weight_kg: float):

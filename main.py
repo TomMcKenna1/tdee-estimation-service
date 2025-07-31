@@ -92,7 +92,7 @@ def process_user(fs: FirestoreService, user: UserInDB):
         return
 
     last_history = fs.get_last_tdee_history(user.uid)
-    yesterday = date.today() - timedelta(days=1)
+    processing_end_date = date.today() - timedelta(days=2)
 
     if last_history:
         start_date = last_history.date + timedelta(days=1)
@@ -104,29 +104,44 @@ def process_user(fs: FirestoreService, user: UserInDB):
         start_date = user.created_at.date()
         state, covariance = get_initial_state(user)
 
-    if start_date > yesterday:
+    if start_date > processing_end_date:
         logging.info(f"User {user.uid} is already up-to-date.")
         return
 
     logging.info(
-        f"Processing date range: {start_date.isoformat()} to {yesterday.isoformat()}"
+        f"Processing date range: {start_date.isoformat()} to {processing_end_date.isoformat()}"
     )
 
     caloric_data = fs.get_caloric_intake_for_date_range(
-        user.uid, start_date - timedelta(days=8), yesterday
+        user.uid, start_date - timedelta(days=8), processing_end_date
     )
-    weight_data = fs.get_weight_logs_for_date_range(user.uid, start_date, yesterday)
+    weight_data = fs.get_weight_logs_for_date_range(
+        user.uid, start_date, processing_end_date
+    )
 
     current_date = start_date
-    while current_date <= yesterday:
+    while current_date <= processing_end_date:
         prev_day = current_date - timedelta(days=1)
         prev_day_intake = caloric_data.get(prev_day)
+        last_known_tdee = state[1]
 
-        if prev_day_intake is None or prev_day_intake == 0.0:
-            logging.warning(
-                f"No caloric intake logged for {prev_day}. Calculating fallback."
-            )
-            last_known_tdee = state[1]
+        # Plausibility check: If intake is logged but seems too low, use fallback.
+        is_implausible = (
+            prev_day_intake is not None
+            and prev_day_intake > 0
+            and prev_day_intake < (last_known_tdee * config.MIN_PLAUSIBLE_INTAKE_RATIO)
+        )
+
+        if prev_day_intake is None or prev_day_intake == 0.0 or is_implausible:
+            if is_implausible:
+                logging.warning(
+                    f"Intake for {prev_day} ({prev_day_intake:.0f} kcal) is implausibly low. Calculating fallback."
+                )
+            else:
+                logging.warning(
+                    f"No caloric intake logged for {prev_day}. Calculating fallback."
+                )
+
             prev_day_intake = _get_fallback_intake(
                 caloric_data, prev_day, last_known_tdee
             )

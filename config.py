@@ -1,11 +1,15 @@
 # tdee_estimation_service/config.py
 
+MIN_PLAUSIBLE_INTAKE_RATIO = 0.6
 # --- Kalman Filter Tuning Parameters ---
 
 # Estimated variance of the daily process noise.
 # How much we expect the user's true TDEE to fluctuate daily, squared.
 # A value of 50^2 means we think TDEE naturally varies by about 50 kcal.
 PROCESS_NOISE_VAR_TDEE = 50.0**2
+# How much we expect the user's calory tracking to fluctuate daily, squared.
+# A value of 200^2 means we think caloric intake varies by around 200 kcal.
+CALORIE_INTAKE_UNCERTAINTY_VAR = 200.0** 2
 
 # Estimated variance of the user's weight measurement, squared.
 # A value of 0.5^2 means we trust the user's scale to be accurate within ~0.5 kg.
