@@ -62,7 +62,9 @@ class TDEEEstimator:
 
         # Predict next covariance
         # Process noise matrix Q
-        weight_variance_from_calories = config.CALORIE_INTAKE_UNCERTAINTY_VAR / (config.KCAL_PER_KG_BODY_WEIGHT ** 2)
+        weight_variance_from_calories = config.CALORIE_INTAKE_UNCERTAINTY_VAR / (
+            config.KCAL_PER_KG_BODY_WEIGHT**2
+        )
         Q = np.array(
             [
                 [weight_variance_from_calories, 0],

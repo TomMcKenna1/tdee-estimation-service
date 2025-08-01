@@ -30,6 +30,11 @@ class UserInDB(BaseModel):
     )
     log_streak: int = Field(default=0, alias="logStreak")
     last_activity_at: Optional[datetime] = Field(default=None, alias="lastActivityAt")
+    current_weight_kg: Optional[float] = Field(
+        default=None,
+        alias="currentWeightKg",
+        description="The user's most recent weight.",
+    )
 
     model_config = ConfigDict(
         alias_generator=to_camel,

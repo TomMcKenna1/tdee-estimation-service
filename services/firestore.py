@@ -1,119 +1,154 @@
 import logging
-from datetime import date, datetime, timedelta
-from typing import List, Dict, Optional
+import os
+from datetime import date, datetime, timedelta, timezone
+from typing import List, Dict, Optional, AsyncGenerator
+
+import firebase_admin
+from firebase_admin import credentials, firestore_async
+from google.cloud.firestore_v1.async_client import AsyncClient
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 from models.user import UserInDB
 from models.tdee_history import TDEEHistory
 
-MOCK_DB = {
-    "users": {
-        "user_123": {
-            "uid": "user_123",
-            "name": "Jane Doe",
-            "email": "jane@example.com",
-            "createdAt": datetime(2025, 7, 1, 0, 0),
-            "onboardingComplete": True,
-            "profile": {
-                "sex": "male",
-                "age": 25,
-                "heightCm": 188,
-                "weightKg": 76,
-                "goal": "maintain_weight",
-                "activityLevel": "moderately_active",
-            },
-        }
-    },
-    "meals": {
-        "meal_1": {
-            "uid": "user_123",
-            "createdAt": datetime(2025, 7, 28, 8, 0),
-            "status": "complete",
-            "data": {"nutrientProfile": {"energy": 500}},
-        },
-        "meal_2": {
-            "uid": "user_123",
-            "createdAt": datetime(2025, 7, 28, 13, 0),
-            "status": "complete",
-            "data": {"nutrientProfile": {"energy": 800}},
-        },
-        "meal_3": {
-            "uid": "user_123",
-            "createdAt": datetime(2025, 7, 28, 19, 0),
-            "status": "complete",
-            "data": {"nutrientProfile": {"energy": 850}},
-        },
-        "meal_4": {
-            "uid": "user_123",
-            "createdAt": datetime(2025, 7, 29, 9, 0),
-            "status": "pending",
-            "data": {"nutrientProfile": {"energy": 400}},
-        },
-    },
-    "weight_logs": {
-        "log_1": {
-            "uid": "user_123",
-            "createdAt": datetime(2025, 7, 26, 7, 0),
-            "weight_kg": 75.5,
-        }
-    },
-    "tdeeHistory": {},
-}
+
+def initialize_firebase_app():
+    """Initializes the Firebase app if it hasn't been already."""
+    if not firebase_admin._apps:
+        cred_path = os.path.join(
+            os.path.dirname(__file__), "..", "service-account.json"
+        )
+        if not os.path.exists(cred_path):
+            raise FileNotFoundError(
+                f"Service account key not found at {cred_path}. "
+                "Please place service-account.json in the project root."
+            )
+        cred = credentials.Certificate(cred_path)
+        firebase_admin.initialize_app(cred)
+        logging.info("Firebase Admin SDK initialized successfully.")
+    else:
+        logging.info("Firebase Admin SDK already initialized.")
 
 
 class FirestoreService:
     """Handles all communication with the Firestore database."""
 
     def __init__(self):
-        logging.info("FirestoreService initialized (using mock data).")
+        initialize_firebase_app()
+        self.db: AsyncClient = firestore_async.client()
+        logging.info("FirestoreService initialized with live database client.")
 
-    def get_all_users(self) -> List[UserInDB]:
-        """Fetches all users from the 'users' collection."""
-        return [UserInDB(**u) for u in MOCK_DB["users"].values()]
+    async def get_all_users(
+        self, page_size: int = 1000
+    ) -> AsyncGenerator[UserInDB, None]:
+        """
+        Fetches all users from the 'users' collection using pagination.
+        """
+        users_ref = self.db.collection("users")
+        cursor = None
+        while True:
+            query = users_ref.order_by("__name__").limit(page_size)
+            if cursor:
+                query = query.start_after(cursor)
 
-    def get_caloric_intake_for_date_range(
+            docs = await query.get()
+            if not docs:
+                break
+
+            for doc in docs:
+                yield UserInDB(uid=doc.id, **doc.to_dict())
+
+            cursor = docs[-1]
+
+    async def get_caloric_intake_for_date_range(
         self, uid: str, start_date: date, end_date: date
     ) -> Dict[date, float]:
-        """Fetches and sums daily caloric intake for a user."""
-        results = {}
-        for d in range((end_date - start_date).days + 1):
-            current_date = start_date + timedelta(days=d)
-            results[current_date] = 0.0
-
-        for meal in MOCK_DB["meals"].values():
-            if meal["uid"] == uid and meal["status"] == "complete":
-                meal_date = meal["createdAt"].date()
-                if start_date <= meal_date <= end_date:
-                    results[meal_date] += meal["data"]["nutrientProfile"]["energy"]
-        return results
-
-    def get_weight_logs_for_date_range(
-        self, uid: str, start_date: date, end_date: date
-    ) -> Dict[date, float]:
-        """Fetches daily weight measurements for a user."""
-        results = {}
-        for log in MOCK_DB["weight_logs"].values():
-            if log["uid"] == uid:
-                log_date = log["createdAt"].date()
-                if start_date <= log_date <= end_date:
-                    results[log_date] = log["weight_kg"]
-        return results
-
-    def get_last_tdee_history(self, uid: str) -> Optional[TDEEHistory]:
-        """Gets the most recent TDEE history entry for a user."""
-        user_history = [h for h in MOCK_DB["tdeeHistory"].values() if h["uid"] == uid]
-        if not user_history:
-            return None
-
-        latest_entry = max(user_history, key=lambda x: x["date"])
-        return TDEEHistory.model_validate(latest_entry)
-
-    def save_tdee_history(self, history_entry: TDEEHistory):
-        """Saves a TDEE history entry to Firestore."""
-        doc_id = f"{history_entry.uid}_{history_entry.date.isoformat()}"
-        data = history_entry.model_dump(by_alias=True)
-        logging.info(
-            f"Saving TDEE history for {doc_id}: TDEE {data['estimatedTdeeKcal']:.0f} kcal"
+        """Fetches and sums daily caloric intake for a user from their subcollection."""
+        results = {
+            start_date + timedelta(days=d): 0.0
+            for d in range((end_date - start_date).days + 1)
+        }
+        start_utc = datetime.combine(
+            start_date, datetime.min.time(), tzinfo=timezone.utc
         )
-        MOCK_DB["tdeeHistory"][doc_id] = data
+        end_utc = datetime.combine(end_date, datetime.max.time(), tzinfo=timezone.utc)
 
-    def get_DB(self):
-        return MOCK_DB
+        meals_ref = self.db.collection("users").document(uid).collection("mealLogs")
+        query = (
+            meals_ref.where(filter=FieldFilter("createdAt", ">=", start_utc))
+            .where(filter=FieldFilter("createdAt", "<=", end_utc))
+            .where(filter=FieldFilter("status", "==", "complete"))
+        )
+        docs = await query.get()
+
+        for doc in docs:
+            meal_data = doc.to_dict()
+            meal_date = meal_data["createdAt"].date()
+            if meal_date in results:
+                results[meal_date] += (
+                    meal_data.get("data", {})
+                    .get("nutrientProfile", {})
+                    .get("energy", 0)
+                )
+        return results
+
+    async def get_weight_logs_for_date_range(
+        self, uid: str, start_date: date, end_date: date
+    ) -> Dict[date, float]:
+        """Fetches daily weight measurements for a user from their subcollection."""
+        results = {}
+        start_utc = datetime.combine(
+            start_date, datetime.min.time(), tzinfo=timezone.utc
+        )
+        end_utc = datetime.combine(end_date, datetime.max.time(), tzinfo=timezone.utc)
+
+        logs_ref = self.db.collection("users").document(uid).collection("weightLogs")
+        query = logs_ref.where(filter=FieldFilter("date", ">=", start_utc)).where(
+            filter=FieldFilter("date", "<=", end_utc)
+        )
+        docs = await query.get()
+
+        daily_logs: Dict[date, List[float]] = {}
+        for doc in docs:
+            log_data = doc.to_dict()
+            log_date = log_data["date"].date()
+            daily_logs.setdefault(log_date, []).append(log_data.get("weightKg", 0.0))
+
+        # If multiple weights are logged on the same day, take the average.
+        for day, weights in daily_logs.items():
+            if weights:
+                results[day] = sum(weights) / len(weights)
+        return results
+
+    async def get_last_tdee_history(self, uid: str) -> Optional[TDEEHistory]:
+        """Gets the most recent TDEE history entry for a user from their subcollection."""
+        history_ref = (
+            self.db.collection("users").document(uid).collection("tdeeHistory")
+        )
+        query = history_ref.order_by("date", direction="DESCENDING").limit(1)
+        docs = await query.get()
+
+        if not docs:
+            return None
+        return TDEEHistory.model_validate(docs[0].to_dict())
+
+    async def save_tdee_history_batch(self, history_entries: List[TDEEHistory]):
+        """Saves a list of TDEE history entries to Firestore in a single batch."""
+        if not history_entries:
+            return
+
+        batch = self.db.batch()
+        user_id = history_entries[0].uid
+        history_ref = (
+            self.db.collection("users").document(user_id).collection("tdeeHistory")
+        )
+
+        for entry in history_entries:
+            doc_id = entry.date.isoformat()
+            doc_ref = history_ref.document(doc_id)
+            batch.set(doc_ref, entry.model_dump(by_alias=True))
+
+        logging.info(
+            f"Committing batch of {len(history_entries)} TDEE updates for user {user_id}."
+        )
+        await batch.commit()

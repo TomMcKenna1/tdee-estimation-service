@@ -1,9 +1,8 @@
-# tdee_estimation_service/main.py
-
 import logging
-from typing import Dict
+import asyncio
+from typing import Dict, List
 import numpy as np
-from datetime import date, timedelta, datetime
+from datetime import date, datetime, timedelta, timezone
 import config
 from services.firestore import FirestoreService
 from services.tdee_estimator import TDEEEstimator
@@ -19,65 +18,49 @@ logging.basicConfig(
 def get_initial_state(user: UserInDB) -> tuple[np.ndarray, np.ndarray]:
     """Initializes the Kalman Filter state for a new user."""
     profile = user.profile
-
-    # 1. Initial State Vector [weight, TDEE]
-    initial_weight = profile.weight_kg
-
+    initial_weight = user.current_weight_kg
     activity_level_str = (
         profile.activity_level.value if profile.activity_level else "sedentary"
     )
     initial_multiplier = config.ACTIVITY_LEVEL_MAPPING.get(
         activity_level_str, config.DEFAULT_ACTIVITY_LEVEL
     )
-
     bmr = calculate_mifflin_st_jeor_bmr(
         profile.sex, profile.age, profile.height_cm, initial_weight
     )
     initial_tdee = bmr * initial_multiplier
-
     X_0 = np.array([initial_weight, initial_tdee])
-
-    # 2. Initial Covariance Matrix P_0
     P_0 = np.array(
         [
             [config.INITIAL_WEIGHT_UNCERTAINTY, 0],
             [0, (bmr * config.INITIAL_ACTIVITY_MULTIPLIER_UNCERTAINTY) ** 2],
         ]
     )
-
     return X_0, P_0
 
 
 def _get_fallback_intake(
     caloric_data: Dict[date, float], up_to_date: date, last_known_tdee: float
 ) -> float:
-    """
-    Calculates fallback caloric intake using a 7-day rolling average of non-zero days.
-    If no data is available, assumes the user ate at their last known TDEE.
-    """
-    # Look for non-zero intake values in the last 7 days
+    """Calculates fallback caloric intake using a 7-day rolling average of non-zero days."""
     relevant_intakes = [
         intake
         for d, intake in caloric_data.items()
         if intake > 0 and 0 < (up_to_date - d).days <= 7
     ]
-
     if relevant_intakes:
         avg = sum(relevant_intakes) / len(relevant_intakes)
         logging.info(f"Using 7-day average intake as fallback: {avg:.0f} kcal")
         return avg
-
     logging.info(
         f"No recent intake data. Using last known TDEE as fallback: {last_known_tdee:.0f} kcal"
     )
     return last_known_tdee
 
 
-def process_user(fs: FirestoreService, user: UserInDB):
-    """
-    Runs the TDEE estimation algorithm for a single user.
-    """
-    logging.info(f"--- Processing user: {user.uid} ({user.name}) ---")
+async def process_user(fs: FirestoreService, user: UserInDB):
+    """Runs the TDEE estimation algorithm for a single user."""
+    logging.info(f"--- Processing user: {user.uid} ({user.email}) ---")
 
     if not all(
         [
@@ -85,21 +68,21 @@ def process_user(fs: FirestoreService, user: UserInDB):
             user.profile.sex,
             user.profile.age,
             user.profile.height_cm,
-            user.profile.weight_kg,
+            user.current_weight_kg,
         ]
     ):
         logging.warning(f"User {user.uid} is missing essential profile data. Skipping.")
         return
 
-    last_history = fs.get_last_tdee_history(user.uid)
+    last_history = await fs.get_last_tdee_history(user.uid)
     processing_end_date = date.today() - timedelta(days=2)
 
     if last_history:
-        start_date = last_history.date + timedelta(days=1)
+        start_date = last_history.date.date() + timedelta(days=1)
         state = np.array(
             [last_history.estimated_weight_kg, last_history.estimated_tdee_kcal]
         )
-        covariance = np.array(last_history.covariance_matrix)
+        covariance = np.array(last_history.covariance_matrix).reshape(2, 2)
     else:
         start_date = user.created_at.date()
         state, covariance = get_initial_state(user)
@@ -112,20 +95,21 @@ def process_user(fs: FirestoreService, user: UserInDB):
         f"Processing date range: {start_date.isoformat()} to {processing_end_date.isoformat()}"
     )
 
-    caloric_data = fs.get_caloric_intake_for_date_range(
+    caloric_data = await fs.get_caloric_intake_for_date_range(
         user.uid, start_date - timedelta(days=8), processing_end_date
     )
-    weight_data = fs.get_weight_logs_for_date_range(
+    weight_data = await fs.get_weight_logs_for_date_range(
         user.uid, start_date, processing_end_date
     )
 
     current_date = start_date
+    daily_updates: List[TDEEHistory] = []
+
     while current_date <= processing_end_date:
         prev_day = current_date - timedelta(days=1)
         prev_day_intake = caloric_data.get(prev_day)
         last_known_tdee = state[1]
 
-        # Plausibility check: If intake is logged but seems too low, use fallback.
         is_implausible = (
             prev_day_intake is not None
             and prev_day_intake > 0
@@ -138,10 +122,9 @@ def process_user(fs: FirestoreService, user: UserInDB):
                     f"Intake for {prev_day} ({prev_day_intake:.0f} kcal) is implausibly low. Calculating fallback."
                 )
             else:
-                logging.warning(
-                    f"No caloric intake logged for {prev_day}. Calculating fallback."
+                logging.info(
+                    f"No caloric intake logged for {prev_day}. Using fallback."
                 )
-
             prev_day_intake = _get_fallback_intake(
                 caloric_data, prev_day, last_known_tdee
             )
@@ -154,7 +137,7 @@ def process_user(fs: FirestoreService, user: UserInDB):
             is_prediction = False
             measured_weight = weight_data[current_date]
             logging.info(
-                f"Weight measurement found for {current_date}: {measured_weight} kg. Performing update."
+                f"Weight measurement found for {current_date}: {measured_weight:.2f} kg. Performing update."
             )
             estimator.update(measured_weight)
 
@@ -162,9 +145,13 @@ def process_user(fs: FirestoreService, user: UserInDB):
         covariance = estimator.covariance
         lower_bound, upper_bound = estimator.get_bounds()
 
+        current_datetime = datetime.combine(
+            current_date, datetime.min.time(), tzinfo=timezone.utc
+        )
+
         history_entry = TDEEHistory(
             uid=user.uid,
-            date=current_date,
+            date=current_datetime,
             estimated_tdee_kcal=state[1],
             lower_bound_kcal=lower_bound,
             upper_bound_kcal=upper_bound,
@@ -174,39 +161,36 @@ def process_user(fs: FirestoreService, user: UserInDB):
             / calculate_mifflin_st_jeor_bmr(
                 user.profile.sex, user.profile.age, user.profile.height_cm, state[0]
             ),
-            covariance_matrix=covariance.tolist(),
+            covariance_matrix=covariance.flatten().tolist(),
         )
-        fs.save_tdee_history(history_entry)
-
+        daily_updates.append(history_entry)
         current_date += timedelta(days=1)
+
+    if daily_updates:
+        await fs.save_tdee_history_batch(daily_updates)
 
     logging.info(f"--- Finished processing user: {user.uid} ---")
 
 
-def run_daily_job():
-    """
-    Main entry point for the daily TDEE estimation task.
-    """
+async def run_daily_job():
+    """Main entry point for the daily TDEE estimation task."""
     logging.info("Starting TDEE estimation daily job.")
     firestore_service = FirestoreService()
 
-    all_users = firestore_service.get_all_users()
-    logging.info(f"Found {len(all_users)} user(s) to process.")
-
-    for user in all_users:
+    user_count = 0
+    async for user in firestore_service.get_all_users():
+        user_count += 1
         try:
-            process_user(firestore_service, user)
+            await process_user(firestore_service, user)
         except Exception as e:
             logging.error(
                 f"An unexpected error occurred while processing user {user.uid}: {e}",
                 exc_info=True,
             )
 
+    logging.info(f"Processed a total of {user_count} user(s).")
     logging.info("TDEE estimation daily job finished.")
-    print(firestore_service.get_DB())
 
 
 if __name__ == "__main__":
-    # To run the service:
-    # python -m tdee_estimation_service.main
-    run_daily_job()
+    asyncio.run(run_daily_job())
