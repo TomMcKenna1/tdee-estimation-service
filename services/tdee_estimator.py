@@ -1,6 +1,5 @@
 import numpy as np
 import config
-from utils.bmr_calculator import calculate_mifflin_st_jeor_bmr
 from models.profile import Sex
 
 
